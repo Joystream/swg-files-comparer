@@ -1,8 +1,10 @@
 import * as fs from 'fs/promises'
 import { PathLike } from 'node:fs'
+import { getFileBirthtime } from './utils/utils'
 
 const LOCAL_FILES_PATH = './local.json'
 const REMOTE_FILES_PATH = './remote.json'
+const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
 const getRemoteBagPath = (bagId: string) => `./remote-${bagId}.json`
 const DIFF_PATH = './diff.json'
 const getDiffBagPath = (bagId: string) => `./diff-${bagId}.json`
@@ -11,6 +13,7 @@ const CHECK_PATH = `./checked.json`
 type StorageObject = {
   id: string
   isAccepted: boolean
+  createdAt: string
 }
 
 type BagWithObjects = {
@@ -61,9 +64,10 @@ query GetStorageBagsObjects($storageBags: [ID!]!, $limit: Int!, $offset: Int!) {
     offset: $offset
   ) {
     id
-    objects {
+    objects(where: {isAccepted_eq: true, createdAt_gt: $startTimestamp}) {
       id
       isAccepted
+      createdAt
     }
   }
 }
@@ -136,7 +140,6 @@ const fetchPaginatedData = async <T>(
   let offset = 0
   let data: T[] = []
   const key = keyOverwrite || Object.keys(variables)[0]
-  console.log('key:', key)
 
   while (hasMoreData) {
     const response = await fetch('https://query.joystream.org/graphql', {
@@ -167,6 +170,11 @@ const fetchPaginatedData = async <T>(
 
 const getAllBucketObjects = async (bucketId: string, bagId: string) => {
   console.log('Getting bags...')
+  const startTime = JSON.parse(await fs.readFile(LOCAL_FILES_PATH, 'utf-8'))?.startTime
+  if (!startTime) {
+    console.log('No start time found, please run localFiles first')
+    process.exit(1)
+  }
   const allBucketBags = await fetchPaginatedData<StorageBucketWithBags>(
     STORAGE_BAGS_QUERY,
     { storageBucket: bucketId },
@@ -185,13 +193,11 @@ const getAllBucketObjects = async (bucketId: string, bagId: string) => {
   for (let i = 0; i < bucketBagsIds.length; i += BATCH_SIZE) {
     const bucketBagsWithObjects = await fetchPaginatedData<BagWithObjects>(
       STORAGE_BAGS_OBJECTS_QUERY,
-      { storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE) },
+      { storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE), startTimestamp: startTime },
       BATCH_SIZE
     )
-    console.log('bag with objects:', bucketBagsWithObjects)
     bucketBagsWithObjects.forEach((bag) => {
-      const acceptedObjects = bag.objects.filter((object) => object.isAccepted)
-      console.log('bag:', bag)
+      const acceptedObjects = bag.objects
       if (acceptedObjects.length !== 0) {
         console.log('accepted:', acceptedObjects.length)
         bagObjectsMap[bag.id] = sortFiles(acceptedObjects.map((object) => object.id))
@@ -200,20 +206,35 @@ const getAllBucketObjects = async (bucketId: string, bagId: string) => {
   }
   const totalObjectsCount = Object.values(bagObjectsMap).flat().length
   console.log(`Found ${totalObjectsCount} accepted objects`)
-  await fs.writeFile(bagId != null ? getRemoteBagPath(bagId) : REMOTE_FILES_PATH, JSON.stringify(bagObjectsMap))
+  await fs.writeFile(bagId !== null ? getRemoteBagPath(bagId) : REMOTE_FILES_PATH, JSON.stringify(bagObjectsMap))
 }
 
 const getLocalFiles = async (path: PathLike) => {
   console.log('Getting files...')
+  const ts = new Date().getTime()
   const allFiles = await fs.readdir(path)
-  const files = allFiles.filter((file) => !isNaN(parseInt(file)))
-  console.log(`Found ${files.length} files`)
-  const sortedFiles = sortFiles(files)
-  await fs.writeFile(LOCAL_FILES_PATH, JSON.stringify(sortedFiles))
+  const acceptedFiles: string[] = []
+  const recentFiles: string[] = []
+  allFiles.forEach((file) => {
+    if (!isNaN(parseInt(file))) {
+      return
+    }
+    if (ts - getFileBirthtime(file).getTime() > RECENT_FILES_THRESHOLD) {
+      acceptedFiles.push(file)
+    } else {
+      recentFiles.push(file)
+    }
+  })
+  console.log(`Found ${acceptedFiles.length} files. Skipping ${recentFiles.length} recent files.`)
+  const sortedFiles = sortFiles(acceptedFiles)
+  await fs.writeFile(
+    LOCAL_FILES_PATH,
+    JSON.stringify({ acceptedFiles: sortedFiles, startTime: ts - RECENT_FILES_THRESHOLD, skippedFiles: recentFiles })
+  )
 }
 
 const getDifferences = async (bagId: string) => {
-  const localFiles: string[] = JSON.parse(await fs.readFile(LOCAL_FILES_PATH, 'utf-8'))
+  const localFiles: string[] = JSON.parse(await fs.readFile(LOCAL_FILES_PATH, 'utf-8'))?.acceptedFiles || []
   const remoteFiles: { [key: string]: string[] } = JSON.parse(
     await fs.readFile(bagId != null ? getRemoteBagPath(bagId) : REMOTE_FILES_PATH, 'utf-8')
   )
