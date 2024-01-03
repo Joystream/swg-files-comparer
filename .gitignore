@@ -28,3 +28,7 @@ dist-storybook
 .DS_Store
 
 figma-import.config.js
+
+# local results JSON files
+
+results/

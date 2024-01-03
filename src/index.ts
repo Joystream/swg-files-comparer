@@ -1,14 +1,18 @@
 import * as fs from 'fs/promises'
-import { PathLike } from 'node:fs'
-import { getFileBirthtime } from './utils/utils'
+import { getFileBirthtime } from './utils/utils.js'
+import psp from 'prompt-sync-plus'
+import { format } from 'date-fns'
 
-const LOCAL_FILES_PATH = './local.json'
-const REMOTE_FILES_PATH = './remote.json'
+const getLocalFilePath = (ts: string) => `./results/local-${ts}.json`
+const getRemoteFilePath = (ts: string) => `./results/remote-${ts}.json`
+const getRemoteBagPath = (bagId: string, ts: string) => `./results/remote-${bagId}-${ts}.json`
+const getDiffPath = (ts: string) => `./results/diff-${ts}.json`
+const getDiffBagPath = (bagId: string, ts: string) => `./results/diff-${bagId}-${ts}.json`
+const getCheckResultPath = (ts: string) => `./results/checked-${ts}.json`
+
 const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
-const getRemoteBagPath = (bagId: string) => `./remote-${bagId}.json`
-const DIFF_PATH = './diff.json'
-const getDiffBagPath = (bagId: string) => `./diff-${bagId}.json`
-const CHECK_PATH = `./checked.json`
+
+const prompt = psp(undefined)
 
 type StorageObject = {
   id: string
@@ -36,6 +40,14 @@ type ActiveBucketMetadataResponse = {
   operatorMetadata: {
     nodeEndpoint: string
   }
+}
+
+enum Commands {
+    LocalFiles = 'localfiles',
+    BucketObjects = 'bucketobjects',
+    Diff = 'diff',
+    CheckMissing = 'checkmissing',
+    Head = 'head'
 }
 
 function sortFiles(files: string[]) {
@@ -168,9 +180,22 @@ const fetchPaginatedData = async <T>(
   return data
 }
 
-const getAllBucketObjects = async (bucketId: string, bagId: string) => {
+const getAllBucketObjects = async (fileTs: string) => {
+  const bucketId = prompt('Enter bucket id: ')
+
+  if (!bucketId || isNaN(parseInt(bucketId))) {
+    console.log('Please provide a bucket id')
+    process.exit(1)
+  }
+  const bagId = prompt('Enter bag id (optional):')
+
+  if (bagId && isNaN(parseInt(bagId))) {
+    console.log('If you want to get only a single bag, provide only the number from the id, dynamic:channel:XXX')
+    process.exit(1)
+  }
+
   console.log('Getting bags...')
-  const startTime = JSON.parse(await fs.readFile(LOCAL_FILES_PATH, 'utf-8'))?.startTime
+  const startTime = JSON.parse(await fs.readFile(getLocalFilePath(fileTs), 'utf-8'))?.startTime
   if (!startTime) {
     console.log('No start time found, please run localFiles first')
     process.exit(1)
@@ -206,13 +231,22 @@ const getAllBucketObjects = async (bucketId: string, bagId: string) => {
   }
   const totalObjectsCount = Object.values(bagObjectsMap).flat().length
   console.log(`Found ${totalObjectsCount} accepted objects`)
-  await fs.writeFile(bagId !== null ? getRemoteBagPath(bagId) : REMOTE_FILES_PATH, JSON.stringify(bagObjectsMap))
+  await fs.writeFile(
+    bagId !== null ? getRemoteBagPath(bagId, fileTs) : getRemoteFilePath(fileTs),
+    JSON.stringify(bagObjectsMap)
+  )
 }
 
-const getLocalFiles = async (path: PathLike) => {
+const getLocalFiles = async (fileTs: string) => {
+  const dirPath = prompt('Enter path to your local files directory: ')
+  if (!dirPath) {
+    console.log('Path is incorrect or not provided')
+    process.exit(1)
+  }
+
   console.log('Getting files...')
   const ts = new Date().getTime()
-  const allFiles = await fs.readdir(path)
+  const allFiles = await fs.readdir(dirPath)
   const acceptedFiles: string[] = []
   const recentFiles: string[] = []
   allFiles.forEach((file) => {
@@ -228,15 +262,22 @@ const getLocalFiles = async (path: PathLike) => {
   console.log(`Found ${acceptedFiles.length} files. Skipping ${recentFiles.length} recent files.`)
   const sortedFiles = sortFiles(acceptedFiles)
   await fs.writeFile(
-    LOCAL_FILES_PATH,
+    getLocalFilePath(fileTs),
     JSON.stringify({ acceptedFiles: sortedFiles, startTime: ts - RECENT_FILES_THRESHOLD, skippedFiles: recentFiles })
   )
 }
 
-const getDifferences = async (bagId: string) => {
-  const localFiles: string[] = JSON.parse(await fs.readFile(LOCAL_FILES_PATH, 'utf-8'))?.acceptedFiles || []
+const getDifferences = async (fileTs: string) => {
+  const bagId = prompt('Enter bag id (optional): ')
+
+  if (bagId && isNaN(parseInt(bagId))) {
+    console.log('If you want to diff only a single bag, provide only the number from the id, dynamic:channel:XXX')
+    process.exit(1)
+  }
+
+  const localFiles: string[] = JSON.parse(await fs.readFile(getLocalFilePath(fileTs), 'utf-8'))?.acceptedFiles || []
   const remoteFiles: { [key: string]: string[] } = JSON.parse(
-    await fs.readFile(bagId != null ? getRemoteBagPath(bagId) : REMOTE_FILES_PATH, 'utf-8')
+    await fs.readFile(bagId != null ? getRemoteBagPath(bagId, fileTs) : getRemoteFilePath(fileTs), 'utf-8')
   )
 
   const localFilesSet = new Set(localFiles)
@@ -260,7 +301,7 @@ const getDifferences = async (bagId: string) => {
   console.log(`Found ${unexpectedLocal.size} unexpected local objects`)
 
   await fs.writeFile(
-    bagId != null ? getDiffBagPath(bagId) : DIFF_PATH,
+    bagId != null ? getDiffBagPath(bagId, fileTs) : getDiffPath(fileTs),
     JSON.stringify({
       unexpectedLocal: [...unexpectedLocal],
       missingObjectsPerBag: missingObjectsPerBag,
@@ -268,9 +309,34 @@ const getDifferences = async (bagId: string) => {
   )
 }
 
-const getMissing = async (diffFilePath: string, ignoreProviders: number[]) => {
-  console.log(`Checking missing objects from ${diffFilePath}...`)
-  const missingObjects = JSON.parse(await fs.readFile(diffFilePath, 'utf-8')).missingObjectsPerBag
+const getMissing = async (fileTs: string) => {
+  const customPath = prompt('Enter path to a diff file (optional):')
+  const ignoreProvidersInput = prompt('Enter providers to ignore (optional) e.g "1,3,5":')
+  let path = getDiffPath(fileTs)
+  let providerInputs = undefined
+
+  const ignoreProviders: number[] = []
+  if (customPath) {
+    if (customPath.includes('.json')) {
+      path = customPath
+    } else {
+      providerInputs = customPath
+    }
+  }
+  if (ignoreProvidersInput) {
+    providerInputs = ignoreProvidersInput
+  }
+  if (providerInputs) {
+    try {
+      providerInputs.split(',').forEach((sp) => ignoreProviders.push(parseInt(sp)))
+    } catch (err) {
+      console.log(`Invalid input for providers, use format 1 or 0,1,4. Err: ${err}`)
+      process.exit(1)
+    }
+  }
+
+  console.log(`Checking missing objects from ${path}...`)
+  const missingObjects = JSON.parse(await fs.readFile(path, 'utf-8')).missingObjectsPerBag
 
   const bagsWithMissingObjects = Object.keys(missingObjects)
 
@@ -377,10 +443,18 @@ const getMissing = async (diffFilePath: string, ignoreProviders: number[]) => {
     results.push(bagResult)
   }
   console.log(`A total of ${foundCount} out of ${triedCount} objects presumed lost were found.`)
-  await fs.writeFile(CHECK_PATH, JSON.stringify(results, null, 2))
+  await fs.writeFile(getCheckResultPath(fileTs), JSON.stringify(results, null, 2))
 }
 
-async function manualHeadRequest(url: string, objectId: string) {
+const manualHeadRequest = async () => {
+  const url = prompt('Enter request url: ')
+  const providerUrl = `${url.split('files/')[0]}files`
+  const objectId = url.split('files/')[1]
+  if (!providerUrl || !objectId) {
+    console.log('Input must be head <URL/api/v1/files/> <objectId>')
+    process.exit(1)
+  }
+
   try {
     const res = await headRequestAsset(url, objectId)
     console.log('Res', res)
@@ -389,67 +463,26 @@ async function manualHeadRequest(url: string, objectId: string) {
   }
 }
 
-const command = process.argv[2]
-const arg = process.argv[3]
-const arg2 = process.argv[4]
+const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
+const fileTs = format(new Date(), 'yyyy-MM-dd-HH-mm')
 
-if (command === 'localFiles') {
-  if (!arg) {
-    console.log('Please provide a path')
+switch (command) {
+  case Commands.LocalFiles:
+    getLocalFiles(fileTs)
+    break
+  case Commands.BucketObjects:
+    getAllBucketObjects(fileTs)
+    break
+  case Commands.Diff:
+    getDifferences(fileTs)
+    break
+  case Commands.CheckMissing:
+    getMissing(fileTs)
+    break
+  case Commands.Head:
+    manualHeadRequest()
+    break
+  default:
+    console.log('Unknown command')
     process.exit(1)
-  }
-  getLocalFiles(arg)
-} else if (command === 'bucketObjects') {
-  if (!arg || isNaN(parseInt(arg))) {
-    console.log('Please provide a bucket id')
-    process.exit(1)
-  }
-  if (arg2 && isNaN(parseInt(arg2))) {
-    console.log('If you want to get only a single bag, provide only the number from the id, dynamic:channel:XXX')
-    process.exit(1)
-  }
-  getAllBucketObjects(arg, arg2)
-} else if (command === 'diff') {
-  if (arg && isNaN(parseInt(arg))) {
-    console.log('If you want to diff only a single bag, provide only the number from the id, dynamic:channel:XXX')
-    process.exit(1)
-  }
-  getDifferences(arg)
-} else if (command === 'checkMissing') {
-  let path = DIFF_PATH
-  let providerInputs = undefined
-  const ignoreProviders: number[] = []
-  if (arg) {
-    if (arg.includes('.json')) {
-      path = arg
-    } else {
-      providerInputs = arg
-    }
-  }
-  if (arg2) {
-    providerInputs = arg2
-  }
-  if (providerInputs) {
-    try {
-      providerInputs.split(',').forEach((sp) => ignoreProviders.push(parseInt(sp)))
-    } catch (err) {
-      console.log(`Invalid input for providers, use format 1 or 0,1,4. Err: ${err}`)
-      process.exit(1)
-    }
-  }
-  getMissing(path, ignoreProviders)
-} else if (command === 'head') {
-  if (arg && arg2) {
-    manualHeadRequest(arg, arg2)
-  } else if (!arg2) {
-    const providerUrl = `${arg.split('files/')[0]}files`
-    const objectId = arg.split('files/')[1]
-    manualHeadRequest(providerUrl, objectId)
-  } else {
-    console.log('Input must be head <URL/api/v1/files> <objectId>')
-    process.exit(1)
-  }
-} else {
-  console.log('Unknown command')
-  process.exit(1)
 }

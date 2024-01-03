@@ -2,7 +2,8 @@
   "name": "swg-files-comparer",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "dist/index.js",
+  "type": "module",
   "scripts": {
     "build": "tsc",
     "start": "yarn run build && node dist/index.js",
@@ -15,7 +16,12 @@
   "devDependencies": {
     "@joystream/prettier-config": "^1.0.0",
     "@types/node": "^20.10.5",
+    "@types/prompt-sync": "^4.2.3",
+    "date-fns": "^3.0.6",
     "prettier": "^3.1.1",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "prompt-sync-plus": "^1.0.2"
   }
 }

@@ -1,13 +1,15 @@
 {
   "compilerOptions": {
-    "target": "es5",
-    "module": "commonjs",
+    "module": "NodeNext",
+    "target": "es2020",
     "outDir": "./dist",
     "rootDir": "./src",
     "strict": true,
-    "moduleResolution": "node",
     "esModuleInterop": true,
-    "lib": ["es2015", "dom"],
+    "moduleResolution": "nodenext",
+    "lib": ["ESNext", "dom"],
+    "types": ["node"],
+    "allowSyntheticDefaultImports": true,
     "downlevelIteration": true
   },
   "exclude": ["./node_modules"]
