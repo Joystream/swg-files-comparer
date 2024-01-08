@@ -402,9 +402,9 @@ const downloadMissing = async () => {
     process.exit(1)
   }
   console.log(`Downloading ${urls.length} missing objects...`)
-  urls.forEach((url: string) => {
+  urls.forEach(async (url: string) => {
     const fileName = url.split('/').slice(-1)[0]
-    fetch(url).then((res) => {
+    await fetch(url).then((res) => {
       const dest = fs.createWriteStream(`${FILE_BASE_PATH}/${fileName}`)
       res?.body?.pipe(dest)
     })
