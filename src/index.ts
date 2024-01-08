@@ -1,14 +1,27 @@
-import * as fs from 'fs/promises'
-import { getFileBirthtime } from './utils/utils.js'
+import * as fs from 'fs'
+import fetch from 'node-fetch'
+import { getFileBirthtime, sortFiles } from './utils/utils.js'
 import psp from 'prompt-sync-plus'
 import { format } from 'date-fns'
-
-const getLocalFilePath = (ts: string) => `./results/local-${ts}.json`
-const getRemoteFilePath = (ts: string) => `./results/remote-${ts}.json`
-const getRemoteBagPath = (bagId: string, ts: string) => `./results/remote-${bagId}-${ts}.json`
-const getDiffPath = (ts: string) => `./results/diff-${ts}.json`
-const getDiffBagPath = (bagId: string, ts: string) => `./results/diff-${bagId}-${ts}.json`
-const getCheckResultPath = (ts: string) => `./results/checked-${ts}.json`
+import {
+  FILE_BASE_PATH,
+  getCheckResultPath,
+  getDiffBagPath,
+  getDiffPath,
+  getFilePathWithPostfix,
+  getFilePostfix,
+  getIncValue,
+  getLocalFilePath,
+  getRemoteBagPath,
+  getRemoteFilePath,
+  setLocalFilePath,
+} from './utils/fs.js'
+import {
+  ACTIVE_BUCKET_METADATA,
+  BUCKETS_ASSIGNED_STORAGE_BAGS,
+  STORAGE_BAGS_OBJECTS_QUERY,
+  STORAGE_BAGS_QUERY,
+} from './api/queries.js'
 
 const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
 
@@ -23,6 +36,14 @@ type StorageObject = {
 type BagWithObjects = {
   id: string
   objects: StorageObject[]
+}
+
+type StorageDataObject = {
+  id: string
+  isAccepted: boolean
+  storageBag: {
+    id: string
+  }
 }
 
 type StorageBucketWithBags = {
@@ -42,83 +63,27 @@ type ActiveBucketMetadataResponse = {
   }
 }
 
+type BagResult = {
+  storageBag: string
+  operatorsChecked: string[]
+  dataObjects: string[]
+  granularResults: {
+    bucketId: string
+    result: number | string
+  }[][]
+  foundObjects: number
+  foundObjectsUrls: string[]
+}
+
 enum Commands {
-    LocalFiles = 'localfiles',
-    BucketObjects = 'bucketobjects',
-    Diff = 'diff',
-    CheckMissing = 'checkmissing',
-    Head = 'head'
+  LocalFiles = 'localfiles',
+  RemoteNode = 'remotenode',
+  BucketObjects = 'bucketobjects',
+  Diff = 'diff',
+  CheckMissing = 'checkmissing',
+  Head = 'head',
+  DownloadMissing = 'downloadmissing',
 }
-
-function sortFiles(files: string[]) {
-  return files.slice().sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
-}
-
-const STORAGE_BAGS_QUERY = `
-query GetStorageBucketBags($storageBucket: ID!, $limit: Int!, $offset: Int!) {
-  storageBags(
-    where: { storageBuckets_some: { id_eq: $storageBucket } }
-    orderBy: createdAt_ASC
-    limit: $limit
-    offset: $offset
-  ) {
-    id
-  }
-}
-`
-
-const STORAGE_BAGS_OBJECTS_QUERY = `
-query GetStorageBagsObjects($storageBags: [ID!]!, $limit: Int!, $offset: Int!) {
-  storageBags(
-    where: { id_in: $storageBags }
-    orderBy: createdAt_ASC
-    limit: $limit
-    offset: $offset
-  ) {
-    id
-    objects(where: {isAccepted_eq: true, createdAt_gt: $startTimestamp}) {
-      id
-      isAccepted
-      createdAt
-    }
-  }
-}
-`
-
-const BUCKETS_ASSIGNED_STORAGE_BAGS = `
-query GetStorageBags($storageBags: [ID!]!, $limit: Int!, $offset: Int!) {
-  storageBags(
-    where: { id_in: $storageBags }
-    orderBy: createdAt_ASC
-    limit: $limit
-    offset: $offset
-  ) {
-    id
-    storageBuckets {
-      id
-    }
-  }
-}
-`
-
-const ACTIVE_BUCKET_METADATA = `
-query GetActiveStorageBucketEndpoints($storageBuckets: [ID!]!, $limit: Int!, $offset: Int!) {
-  storageBuckets(
-    where: { id_in: $storageBuckets }
-    orderBy: createdAt_ASC
-    limit: $limit
-    offset: $offset
-  ) {
-    id
-    operatorStatus {
-      __typename
-    }
-    operatorMetadata {
-      nodeEndpoint
-    }
-  }
-}
-`
 
 const headRequestAsset = async (baseUrl: string, objectId: string) => {
   const url = `${baseUrl}/${objectId}`
@@ -169,7 +134,7 @@ const fetchPaginatedData = async <T>(
       throw new Error(`Error fetching data: ${response.statusText}`)
     }
 
-    const jsonResponse = await response.json()
+    const jsonResponse: any = await response.json()
 
     data = data.concat(jsonResponse.data[key])
     hasMoreData = jsonResponse.data[key].length === pageSize
@@ -180,7 +145,7 @@ const fetchPaginatedData = async <T>(
   return data
 }
 
-const getAllBucketObjects = async (fileTs: string) => {
+const getAllBucketObjects = async () => {
   const bucketId = prompt('Enter bucket id: ')
 
   if (!bucketId || isNaN(parseInt(bucketId))) {
@@ -195,11 +160,6 @@ const getAllBucketObjects = async (fileTs: string) => {
   }
 
   console.log('Getting bags...')
-  const startTime = JSON.parse(await fs.readFile(getLocalFilePath(fileTs), 'utf-8'))?.startTime
-  if (!startTime) {
-    console.log('No start time found, please run localFiles first')
-    process.exit(1)
-  }
   const allBucketBags = await fetchPaginatedData<StorageBucketWithBags>(
     STORAGE_BAGS_QUERY,
     { storageBucket: bucketId },
@@ -216,28 +176,32 @@ const getAllBucketObjects = async (fileTs: string) => {
   } = {}
   const BATCH_SIZE = 1000
   for (let i = 0; i < bucketBagsIds.length; i += BATCH_SIZE) {
-    const bucketBagsWithObjects = await fetchPaginatedData<BagWithObjects>(
+    // console.log('bucketbagsIds', bucketBagsIds.slice(i, i + BATCH_SIZE))
+    const storageDataObjects = await fetchPaginatedData<StorageDataObject>(
       STORAGE_BAGS_OBJECTS_QUERY,
-      { storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE), startTimestamp: startTime },
-      BATCH_SIZE
+      {
+        storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE),
+        startTimestamp: new Date(new Date().getTime() - RECENT_FILES_THRESHOLD),
+      },
+      BATCH_SIZE,
+      'storageDataObjects'
     )
-    bucketBagsWithObjects.forEach((bag) => {
-      const acceptedObjects = bag.objects
-      if (acceptedObjects.length !== 0) {
-        console.log('accepted:', acceptedObjects.length)
-        bagObjectsMap[bag.id] = sortFiles(acceptedObjects.map((object) => object.id))
-      }
+    // console.log(storageDataObjects)
+    console.log('i:', i, ' accepted:', storageDataObjects.length)
+    storageDataObjects.forEach((object) => {
+      const bagId = object.storageBag.id
+      bagObjectsMap[bagId] = Array.isArray(bagObjectsMap[bagId]) ? [...bagObjectsMap[bagId], object.id] : [object.id]
     })
   }
   const totalObjectsCount = Object.values(bagObjectsMap).flat().length
   console.log(`Found ${totalObjectsCount} accepted objects`)
-  await fs.writeFile(
-    bagId !== null ? getRemoteBagPath(bagId, fileTs) : getRemoteFilePath(fileTs),
+  await fs.promises.writeFile(
+    bagId !== null ? getRemoteBagPath(bagId, filesPostfix) : getRemoteFilePath(filesPostfix),
     JSON.stringify(bagObjectsMap)
   )
 }
 
-const getLocalFiles = async (fileTs: string) => {
+const getLocalFiles = async () => {
   const dirPath = prompt('Enter path to your local files directory: ')
   if (!dirPath) {
     console.log('Path is incorrect or not provided')
@@ -246,28 +210,16 @@ const getLocalFiles = async (fileTs: string) => {
 
   console.log('Getting files...')
   const ts = new Date().getTime()
-  const allFiles = await fs.readdir(dirPath)
-  const acceptedFiles: string[] = []
-  const recentFiles: string[] = []
-  allFiles.forEach((file) => {
-    if (!isNaN(parseInt(file))) {
-      return
-    }
-    if (ts - getFileBirthtime(file).getTime() > RECENT_FILES_THRESHOLD) {
-      acceptedFiles.push(file)
-    } else {
-      recentFiles.push(file)
-    }
+  const allFiles = await fs.promises.readdir(dirPath)
+  const acceptedFiles = allFiles.filter((file) => {
+    !isNaN(parseInt(file))
   })
-  console.log(`Found ${acceptedFiles.length} files. Skipping ${recentFiles.length} recent files.`)
+  console.log(`Found ${acceptedFiles.length} files.`)
   const sortedFiles = sortFiles(acceptedFiles)
-  await fs.writeFile(
-    getLocalFilePath(fileTs),
-    JSON.stringify({ acceptedFiles: sortedFiles, startTime: ts - RECENT_FILES_THRESHOLD, skippedFiles: recentFiles })
-  )
+  await fs.promises.writeFile(setLocalFilePath(nextInc), JSON.stringify(sortedFiles))
 }
 
-const getDifferences = async (fileTs: string) => {
+const getDifferences = async () => {
   const bagId = prompt('Enter bag id (optional): ')
 
   if (bagId && isNaN(parseInt(bagId))) {
@@ -275,9 +227,12 @@ const getDifferences = async (fileTs: string) => {
     process.exit(1)
   }
 
-  const localFiles: string[] = JSON.parse(await fs.readFile(getLocalFilePath(fileTs), 'utf-8'))?.acceptedFiles || []
+  const localFiles: string[] = JSON.parse(await fs.promises.readFile(getLocalFilePath(filesPostfix), 'utf-8')) || []
   const remoteFiles: { [key: string]: string[] } = JSON.parse(
-    await fs.readFile(bagId != null ? getRemoteBagPath(bagId, fileTs) : getRemoteFilePath(fileTs), 'utf-8')
+    await fs.promises.readFile(
+      bagId != null ? getRemoteBagPath(bagId, filesPostfix) : getRemoteFilePath(filesPostfix),
+      'utf-8'
+    )
   )
 
   const localFilesSet = new Set(localFiles)
@@ -300,8 +255,8 @@ const getDifferences = async (fileTs: string) => {
   console.log(`Missing ${missingObjects.size} objects`)
   console.log(`Found ${unexpectedLocal.size} unexpected local objects`)
 
-  await fs.writeFile(
-    bagId != null ? getDiffBagPath(bagId, fileTs) : getDiffPath(fileTs),
+  await fs.promises.writeFile(
+    bagId != null ? getDiffBagPath(bagId, filesPostfix) : getDiffPath(filesPostfix),
     JSON.stringify({
       unexpectedLocal: [...unexpectedLocal],
       missingObjectsPerBag: missingObjectsPerBag,
@@ -309,10 +264,10 @@ const getDifferences = async (fileTs: string) => {
   )
 }
 
-const getMissing = async (fileTs: string) => {
+const getMissing = async () => {
   const customPath = prompt('Enter path to a diff file (optional):')
   const ignoreProvidersInput = prompt('Enter providers to ignore (optional) e.g "1,3,5":')
-  let path = getDiffPath(fileTs)
+  let path = getDiffPath(filesPostfix)
   let providerInputs = undefined
 
   const ignoreProviders: number[] = []
@@ -336,7 +291,7 @@ const getMissing = async (fileTs: string) => {
   }
 
   console.log(`Checking missing objects from ${path}...`)
-  const missingObjects = JSON.parse(await fs.readFile(path, 'utf-8')).missingObjectsPerBag
+  const missingObjects = JSON.parse(await fs.promises.readFile(path, 'utf-8')).missingObjectsPerBag
 
   const bagsWithMissingObjects = Object.keys(missingObjects)
 
@@ -392,21 +347,13 @@ const getMissing = async (fileTs: string) => {
   for (let bagId of bagsWithMissingObjects) {
     const assignedSps = bucketsForBags[bagId]
     const missingObjectsInBag = missingObjects[bagId]
-    const bagResult: {
-      storageBag: string
-      operatorsChecked: string[]
-      dataObjects: string[]
-      granularResults: {
-        bucketId: string
-        result: number | string
-      }[][]
-      foundObjects: number
-    } = {
+    const bagResult: BagResult = {
       storageBag: bagId,
       operatorsChecked: assignedSps,
       dataObjects: missingObjectsInBag,
       granularResults: [],
       foundObjects: 0,
+      foundObjectsUrls: [],
     }
     triedCount += missingObjectsInBag.length
     for (let dataObjectId of missingObjectsInBag) {
@@ -422,6 +369,7 @@ const getMissing = async (fileTs: string) => {
           })
           if (res == 200) {
             found = true
+            bagResult.foundObjectsUrls.push(`${providerUrl}/${dataObjectId}`)
             console.log(
               `Object ID ${dataObjectId} in bag ${bagId} is available in bucket ${sp} at ${providerUrl}/${dataObjectId}.`
             )
@@ -443,7 +391,24 @@ const getMissing = async (fileTs: string) => {
     results.push(bagResult)
   }
   console.log(`A total of ${foundCount} out of ${triedCount} objects presumed lost were found.`)
-  await fs.writeFile(getCheckResultPath(fileTs), JSON.stringify(results, null, 2))
+  await fs.promises.writeFile(getCheckResultPath(filesPostfix), JSON.stringify(results, null, 2))
+}
+
+const downloadMissing = async () => {
+  const diff = JSON.parse(await fs.promises.readFile(getDiffPath(filesPostfix), 'utf-8'))
+  const urls = diff.map((bagResult: BagResult) => bagResult.foundObjectsUrls).flat()
+  if (urls.length === 0) {
+    console.log('No missing objects found')
+    process.exit(1)
+  }
+  console.log(`Downloading ${urls.length} missing objects...`)
+  urls.forEach((url: string) => {
+    const fileName = url.split('/').slice(-1)[0]
+    fetch(url).then((res) => {
+      const dest = fs.createWriteStream(`${FILE_BASE_PATH}/${fileName}`)
+      res?.body?.pipe(dest)
+    })
+  })
 }
 
 const manualHeadRequest = async () => {
@@ -463,24 +428,50 @@ const manualHeadRequest = async () => {
   }
 }
 
+const checkRemoteNode = async () => {
+  let endpoint = ''
+  try {
+    endpoint = prompt('Enter remote node endpoint: ')
+  } catch (err) {
+    console.log('Entered endpoint is not valid')
+    process.exit(1)
+  }
+  const localFilesEndpoint = endpoint + '/storage/api/v1/state/data-objects'
+  const nodeName = new URL(endpoint).hostname.replaceAll('.', '-')
+  await fetch(localFilesEndpoint)
+    .then((res) => res.json())
+    .then((json) => {
+      fs.promises.writeFile(setLocalFilePath(nextInc, nodeName), JSON.stringify(json))
+    })
+}
+
 const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
-const fileTs = format(new Date(), 'yyyy-MM-dd-HH-mm')
+const nextInc = await getIncValue()
+console.log('nextInc:', nextInc)
+const filesPostfix = await getFilePostfix()
+console.log('postfix:', filesPostfix)
 
 switch (command) {
   case Commands.LocalFiles:
-    getLocalFiles(fileTs)
+    getLocalFiles()
     break
   case Commands.BucketObjects:
-    getAllBucketObjects(fileTs)
+    getAllBucketObjects()
     break
   case Commands.Diff:
-    getDifferences(fileTs)
+    getDifferences()
     break
   case Commands.CheckMissing:
-    getMissing(fileTs)
+    getMissing()
     break
   case Commands.Head:
     manualHeadRequest()
+    break
+  case Commands.RemoteNode:
+    checkRemoteNode()
+    break
+  case Commands.DownloadMissing:
+    downloadMissing()
     break
   default:
     console.log('Unknown command')
