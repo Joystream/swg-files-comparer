@@ -14,7 +14,6 @@ export const getIncValue = async () => {
     console.log('length: 0')
     return '0001'
   }
-  console.log('length:', allLocalFiles.length)
   const incValues = allLocalFiles.map((name) => name.split('-').slice(-1)[0])
   const maxInc = incValues.reduce((prev, curr) => (prev > curr ? prev : curr))
   return ('0000' + (parseInt(maxInc) + 1)).slice(-4)
@@ -48,3 +47,7 @@ export const getDiffPath = (postfix: string) => getFilePathWithPostfix('diff', p
 export const getDiffBagPath = (bagId: string, postfix: string) =>
   getFilePathWithPostfix(`diff${bagId ? `-${bagId}` : ''}`, postfix)
 export const getCheckResultPath = (postfix: string) => getFilePathWithPostfix('checked', postfix)
+
+export const getAllLocalFilePath = (postfix: string) => getFilePathWithPostfix('localMerged', postfix)
+
+export const getAllRemoteFilePath = (postfix: string) => getFilePathWithPostfix('remoteMerged', postfix)

@@ -5,6 +5,8 @@ import psp from 'prompt-sync-plus'
 import { format } from 'date-fns'
 import {
   FILE_BASE_PATH,
+  getAllLocalFilePath,
+  getAllRemoteFilePath,
   getCheckResultPath,
   getDiffBagPath,
   getDiffPath,
@@ -18,72 +20,25 @@ import {
 } from './utils/fs.js'
 import {
   ACTIVE_BUCKET_METADATA,
+  ALL_STORAGE_BAGS_OBJECTS_QUERY,
+  ALL_STORAGE_OPERATORS,
   BUCKETS_ASSIGNED_STORAGE_BAGS,
   STORAGE_BAGS_OBJECTS_QUERY,
   STORAGE_BAGS_QUERY,
 } from './api/queries.js'
+import {
+  ActiveBucketMetadataResponse,
+  BagResult,
+  BagWithObjects,
+  Commands,
+  StorageBuckets,
+  StorageBucketWithBags,
+  StorageObject,
+} from './types.js'
 
 const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
 
 const prompt = psp(undefined)
-
-type StorageObject = {
-  id: string
-  isAccepted: boolean
-  createdAt: string
-}
-
-type BagWithObjects = {
-  id: string
-  objects: StorageObject[]
-}
-
-type StorageDataObject = {
-  id: string
-  isAccepted: boolean
-  storageBag: {
-    id: string
-  }
-}
-
-type StorageBucketWithBags = {
-  id: string
-  storageBags: {
-    id: string
-  }[]
-}
-
-type ActiveBucketMetadataResponse = {
-  id: string
-  operatorStatus: {
-    __typename: string
-  }
-  operatorMetadata: {
-    nodeEndpoint: string
-  }
-}
-
-type BagResult = {
-  storageBag: string
-  operatorsChecked: string[]
-  dataObjects: string[]
-  granularResults: {
-    bucketId: string
-    result: number | string
-  }[][]
-  foundObjects: number
-  foundObjectsUrls: string[]
-}
-
-enum Commands {
-  LocalFiles = 'localfiles',
-  RemoteNode = 'remotenode',
-  BucketObjects = 'bucketobjects',
-  Diff = 'diff',
-  CheckMissing = 'checkmissing',
-  Head = 'head',
-  DownloadMissing = 'downloadmissing',
-}
 
 const headRequestAsset = async (baseUrl: string, objectId: string) => {
   const url = `${baseUrl}/${objectId}`
@@ -111,16 +66,22 @@ const fetchPaginatedData = async <T>(
   query: string,
   variables: object,
   pageSize: number,
-  keyOverwrite?: string
+  keyOverwrite?: string,
+  logProgress?: boolean
 ): Promise<T[]> => {
+  const controller = new AbortController()
   let hasMoreData = true
   let offset = 0
   let data: T[] = []
   const key = keyOverwrite || Object.keys(variables)[0]
+  let retryCount = 0
 
   while (hasMoreData) {
+    const timeoutId = setTimeout(() => controller.abort(), 1000 * 60 * 5) // 5 minutes
+    logProgress && console.log('Fetching data. Page:', offset / pageSize)
     const response = await fetch('https://query.joystream.org/graphql', {
       method: 'POST',
+      signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         query: query,
@@ -128,10 +89,19 @@ const fetchPaginatedData = async <T>(
       }),
     })
 
+    clearTimeout(timeoutId)
+
     if (!response.ok) {
       const error = await response.text()
       console.log(error)
-      throw new Error(`Error fetching data: ${response.statusText}`)
+
+      if (retryCount < 5) {
+        console.log('Retrying... Retry count:', retryCount)
+        retryCount++
+        continue
+      } else {
+        throw new Error(`Error fetching data: ${response.statusText}`)
+      }
     }
 
     const jsonResponse: any = await response.json()
@@ -145,8 +115,8 @@ const fetchPaginatedData = async <T>(
   return data
 }
 
-const getAllBucketObjects = async () => {
-  const bucketId = prompt('Enter bucket id: ')
+const getAllBucketObjects = async (id?: string) => {
+  const bucketId = id ? id : prompt('Enter bucket id: ')
 
   if (!bucketId || isNaN(parseInt(bucketId))) {
     console.log('Please provide a bucket id')
@@ -176,23 +146,26 @@ const getAllBucketObjects = async () => {
   } = {}
   const BATCH_SIZE = 1000
   for (let i = 0; i < bucketBagsIds.length; i += BATCH_SIZE) {
-    // console.log('bucketbagsIds', bucketBagsIds.slice(i, i + BATCH_SIZE))
-    const storageDataObjects = await fetchPaginatedData<StorageDataObject>(
+    const storageBags = await fetchPaginatedData<BagWithObjects>(
       STORAGE_BAGS_OBJECTS_QUERY,
       {
         storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE),
         startTimestamp: new Date(new Date().getTime() - RECENT_FILES_THRESHOLD),
       },
       BATCH_SIZE,
-      'storageDataObjects'
+      'storageBags'
     )
-    // console.log(storageDataObjects)
-    console.log('i:', i, ' accepted:', storageDataObjects.length)
-    storageDataObjects.forEach((object) => {
-      const bagId = object.storageBag.id
-      bagObjectsMap[bagId] = Array.isArray(bagObjectsMap[bagId]) ? [...bagObjectsMap[bagId], object.id] : [object.id]
+
+    const filteredBags = storageBags.map((bag) => ({ ...bag, objects: bag.objects.filter((obj) => obj.isAccepted) }))
+    const acceptedObjectsNumber = filteredBags.map((bag) => bag.objects.length).reduce((acc, val) => acc + val, 0)
+    console.log('i:', i, ' accepted:', acceptedObjectsNumber)
+
+    filteredBags.forEach((bag) => {
+      const bagId = bag.id
+      bagObjectsMap[bagId] = bag.objects.map((obj) => obj.id)
     })
   }
+
   const totalObjectsCount = Object.values(bagObjectsMap).flat().length
   console.log(`Found ${totalObjectsCount} accepted objects`)
   await fs.promises.writeFile(
@@ -219,33 +192,48 @@ const getLocalFiles = async () => {
   await fs.promises.writeFile(setLocalFilePath(nextInc), JSON.stringify(sortedFiles))
 }
 
-const getDifferences = async () => {
-  const bagId = prompt('Enter bag id (optional): ')
+const getDifferences = async (locals?: string[], remotes?: { [key: string]: StorageObject[] }) => {
+  const bagId = locals ? null : prompt('Enter bag id (optional): ')
 
   if (bagId && isNaN(parseInt(bagId))) {
     console.log('If you want to diff only a single bag, provide only the number from the id, dynamic:channel:XXX')
     process.exit(1)
   }
 
-  const localFiles: string[] = JSON.parse(await fs.promises.readFile(getLocalFilePath(filesPostfix), 'utf-8')) || []
-  const remoteFiles: { [key: string]: string[] } = JSON.parse(
-    await fs.promises.readFile(
-      bagId != null ? getRemoteBagPath(bagId, filesPostfix) : getRemoteFilePath(filesPostfix),
-      'utf-8'
+  const localFiles: string[] =
+    locals || JSON.parse(await fs.promises.readFile(getLocalFilePath(filesPostfix), 'utf-8')) || []
+  const remoteFiles: { [key: string]: StorageObject[] } =
+    remotes ||
+    JSON.parse(
+      await fs.promises.readFile(
+        bagId != null ? getRemoteBagPath(bagId, filesPostfix) : getRemoteFilePath(filesPostfix),
+        'utf-8'
+      )
     )
-  )
 
   const localFilesSet = new Set(localFiles)
-  const allRemoteFilesSet = new Set(Object.values(remoteFiles).flat())
+  const remoteApprovedSet = new Set(
+    Object.values(remoteFiles)
+      .map((objects) => objects.filter((obj) => obj.isAccepted).map((obj) => obj.id))
+      .flat()
+  )
+  const remoteUnapprovedSet = new Set(
+    Object.values(remoteFiles)
+      .map((objects) => objects.filter((obj) => !obj.isAccepted).map((obj) => obj.id))
+      .flat()
+  )
 
-  const unexpectedLocal = new Set([...localFilesSet].filter((id) => !allRemoteFilesSet.has(id)))
-  console.log(`Unexpected local files: ${JSON.stringify([...unexpectedLocal])}`)
+  const unexpectedUnapproved = new Set([...localFilesSet].filter((id) => remoteUnapprovedSet.has(id)))
+  const unexpectedLocal = new Set(
+    [...localFilesSet].filter((id) => !remoteApprovedSet.has(id) && !unexpectedUnapproved.has(id))
+  )
+  // console.log(`Unexpected local files: ${JSON.stringify([...unexpectedLocal])}`)
 
   const missingObjectsPerBag: { [bagId: string]: string[] } = {}
   Object.entries(remoteFiles).forEach(([bagId, objects]) => {
-    const missingObjects = objects.filter((id) => !localFilesSet.has(id))
+    const missingObjects = objects.filter(({ id }) => !localFilesSet.has(id)).map((object) => object.id)
     if (missingObjects.length !== 0) {
-      console.log(`Bag ${bagId} missing ${missingObjects.length} objects: ${JSON.stringify(missingObjects)}`)
+      // console.log(`Bag ${bagId} missing ${missingObjects.length} objects: ${JSON.stringify(missingObjects)}`)
       missingObjectsPerBag[bagId] = missingObjects
     }
   })
@@ -254,6 +242,7 @@ const getDifferences = async () => {
 
   console.log(`Missing ${missingObjects.size} objects`)
   console.log(`Found ${unexpectedLocal.size} unexpected local objects`)
+  console.log(`Found ${unexpectedUnapproved.size} QN unapproved local objects`)
 
   await fs.promises.writeFile(
     bagId != null ? getDiffBagPath(bagId, filesPostfix) : getDiffPath(filesPostfix),
@@ -411,6 +400,47 @@ const downloadMissing = async () => {
   })
 }
 
+const checkAllOperators = async () => {
+  const allOperators = await fetchPaginatedData<StorageBuckets>(ALL_STORAGE_OPERATORS, {}, 1000, 'storageBuckets')
+  const objectIds: string[] = []
+  for (let index = 0; index < allOperators.length; index++) {
+    const operator = allOperators[index]
+    console.log(
+      `Checking operator ${operator.id} at ${operator.operatorMetadata.nodeEndpoint} (${index + 1} of ${
+        allOperators.length
+      })`
+    )
+    console.log('url', operator.operatorMetadata.nodeEndpoint.split('/').slice(0, -2).join('/'))
+    const bucketFiles = await checkRemoteNode(operator.operatorMetadata.nodeEndpoint.split('/').slice(0, -2).join('/'))
+    if (!bucketFiles) {
+      continue
+    }
+    const filesSet = new Set(Object.values(bucketFiles).flat())
+
+    // spread exceeds the stack size unfortunately
+    filesSet.forEach((file) => objectIds.push(file))
+  }
+  console.log('All operators checked')
+  const allFilesSet = new Set(objectIds)
+  fs.promises.writeFile(getAllLocalFilePath(filesPostfix), JSON.stringify([...allFilesSet]))
+
+  console.log('Getting objects... This will take 1+hr and ~600 requests of data, please be patient.')
+  const data = await fetchPaginatedData<BagWithObjects>(
+    ALL_STORAGE_BAGS_OBJECTS_QUERY,
+    {}, // { startTimestamp: new Date(new Date().getTime() - RECENT_FILES_THRESHOLD) },
+    100,
+    'storageBags',
+    true
+  )
+  const bagToObjectsMap: { [key: string]: StorageObject[] } = {}
+  data.forEach((bag) => {
+    bagToObjectsMap[bag.id] = bag.objects
+  })
+  fs.promises.writeFile(getAllRemoteFilePath(filesPostfix), JSON.stringify(bagToObjectsMap))
+
+  getDifferences([...allFilesSet], bagToObjectsMap)
+}
+
 const manualHeadRequest = async () => {
   const url = prompt('Enter request url: ')
   const providerUrl = `${url.split('files/')[0]}files`
@@ -428,28 +458,33 @@ const manualHeadRequest = async () => {
   }
 }
 
-const checkRemoteNode = async () => {
-  let endpoint = ''
-  try {
-    endpoint = prompt('Enter remote node endpoint: ')
-  } catch (err) {
-    console.log('Entered endpoint is not valid')
-    process.exit(1)
+const checkRemoteNode = async (url?: string) => {
+  let endpoint = url || ''
+  if (!endpoint) {
+    try {
+      endpoint = prompt('Enter remote node endpoint: ')
+    } catch (err) {
+      console.log('Entered endpoint is not valid')
+      process.exit(1)
+    }
   }
   const localFilesEndpoint = endpoint + '/storage/api/v1/state/data-objects'
   const nodeName = new URL(endpoint).hostname.replaceAll('.', '-')
-  await fetch(localFilesEndpoint)
+  const res = await fetch(localFilesEndpoint)
     .then((res) => res.json())
     .then((json) => {
-      fs.promises.writeFile(setLocalFilePath(nextInc, nodeName), JSON.stringify(json))
+      if (url) {
+        return json
+      } else {
+        fs.promises.writeFile(setLocalFilePath(nextInc, nodeName), JSON.stringify(json))
+      }
     })
+  return res ? res : null
 }
 
 const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
 const nextInc = await getIncValue()
-console.log('nextInc:', nextInc)
 const filesPostfix = await getFilePostfix()
-console.log('postfix:', filesPostfix)
 
 switch (command) {
   case Commands.LocalFiles:
@@ -464,6 +499,11 @@ switch (command) {
   case Commands.CheckMissing:
     getMissing()
     break
+  case Commands.CheckNode:
+    await checkRemoteNode()
+    await getAllBucketObjects()
+    await getDifferences()
+    break
   case Commands.Head:
     manualHeadRequest()
     break
@@ -472,6 +512,9 @@ switch (command) {
     break
   case Commands.DownloadMissing:
     downloadMissing()
+    break
+  case Commands.CheckAllOperators:
+    checkAllOperators()
     break
   default:
     console.log('Unknown command')

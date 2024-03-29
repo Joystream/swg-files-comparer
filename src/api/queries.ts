@@ -12,14 +12,26 @@ query GetStorageBucketBags($storageBucket: ID!, $limit: Int!, $offset: Int!) {
 `
 
 export const STORAGE_BAGS_OBJECTS_QUERY = `
-query GetStorageBagsObjects($storageBags: [ID!]!, $limit: Int!, $offset: Int!, $startTimestamp: DateTime!) {
-storageDataObjects(where: {storageBag: {id_in: $storageBags}, createdAt_lt: $startTimestamp, isAccepted_eq: true}, limit: $limit, offset: $offset) {
-    id
-    isAccepted
-    storageBag {
-      id
-    }
-  }
+query GetStorageBags($storageBags: [ID!]!, $limit: Int!, $offset: Int!, $startTimestamp: DateTime!) {
+ storageBags(where:{id_in: $storageBags, createdAt_lt: $startTimestamp}, limit: $limit, offset: $offset){
+     id
+     objects {
+       id
+       isAccepted
+     }
+   }
+}
+`
+
+export const ALL_STORAGE_BAGS_OBJECTS_QUERY = `
+query GetStorageBags($limit: Int!, $offset: Int!) {
+ storageBags(limit: $limit, offset: $offset, orderBy: createdAt_ASC){
+     id
+     objects {
+       id
+       isAccepted
+     }
+   }
 }
 `
 
@@ -53,6 +65,21 @@ query GetActiveStorageBucketEndpoints($storageBuckets: [ID!]!, $limit: Int!, $of
     }
     operatorMetadata {
       nodeEndpoint
+    }
+  }
+}
+`
+
+export const ALL_STORAGE_OPERATORS = `
+query {
+  storageBuckets {
+    id
+    operatorMetadata {
+      id
+      nodeEndpoint
+      storagebucketoperatorMetadata {
+        id
+      }
     }
   }
 }
