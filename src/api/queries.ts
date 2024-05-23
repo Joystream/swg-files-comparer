@@ -12,8 +12,8 @@ query GetStorageBucketBags($storageBucket: ID!, $limit: Int!, $offset: Int!) {
 `
 
 export const STORAGE_BAGS_OBJECTS_QUERY = `
-query GetStorageBags($storageBags: [ID!]!, $limit: Int!, $offset: Int!, $startTimestamp: DateTime!) {
- storageBags(where:{id_in: $storageBags, createdAt_lt: $startTimestamp}, limit: $limit, offset: $offset){
+query GetStorageBags($storageBags: [ID!]!, $limit: Int!, $offset: Int!, $startTimestamp: DateTime!, $endTimestamp) {
+ storageBags(where:{id_in: $storageBags, createdAt_lt: $startTimestamp, createdAt_gt: $endTimestamp}, limit: $limit, offset: $offset){
      id
      objects {
        id

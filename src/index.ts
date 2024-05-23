@@ -115,7 +115,7 @@ const fetchPaginatedData = async <T>(
   return data
 }
 
-const getAllBucketObjects = async (id?: string) => {
+const getBucketObjects = async (id?: string) => {
   const bucketId = id ? id : prompt('Enter bucket id: ')
 
   if (!bucketId || isNaN(parseInt(bucketId))) {
@@ -123,6 +123,15 @@ const getAllBucketObjects = async (id?: string) => {
     process.exit(1)
   }
   const bagId = prompt('Enter bag id (optional):')
+  const timeRange = prompt('Enter start and end time (optional, format: startTimestamp-endTimestamp):');
+
+  let startTime, endTime;
+  if (timeRange) {
+    customTimestamp = true
+    const timestamps = timeRange.split('-');
+    startTime = timestamps[0] ? Number(timestamps[0]) : undefined;
+    endTime = timestamps[1] ? Number(timestamps[1]) : undefined;
+  }
 
   if (bagId && isNaN(parseInt(bagId))) {
     console.log('If you want to get only a single bag, provide only the number from the id, dynamic:channel:XXX')
@@ -150,7 +159,8 @@ const getAllBucketObjects = async (id?: string) => {
       STORAGE_BAGS_OBJECTS_QUERY,
       {
         storageBags: bucketBagsIds.slice(i, i + BATCH_SIZE),
-        startTimestamp: new Date(new Date().getTime() - RECENT_FILES_THRESHOLD),
+        startTimestamp: startTime ? new Date(startTime) : new Date(new Date().getTime() - RECENT_FILES_THRESHOLD),
+        endTimestamp: endTime ? new Date(endTime) : undefined,
       },
       BATCH_SIZE,
       'storageBags'
@@ -227,13 +237,11 @@ const getDifferences = async (locals?: string[], remotes?: { [key: string]: Stor
   const unexpectedLocal = new Set(
     [...localFilesSet].filter((id) => !remoteApprovedSet.has(id) && !unexpectedUnapproved.has(id))
   )
-  // console.log(`Unexpected local files: ${JSON.stringify([...unexpectedLocal])}`)
 
   const missingObjectsPerBag: { [bagId: string]: string[] } = {}
   Object.entries(remoteFiles).forEach(([bagId, objects]) => {
     const missingObjects = objects.filter(({ id }) => !localFilesSet.has(id)).map((object) => object.id)
     if (missingObjects.length !== 0) {
-      // console.log(`Bag ${bagId} missing ${missingObjects.length} objects: ${JSON.stringify(missingObjects)}`)
       missingObjectsPerBag[bagId] = missingObjects
     }
   })
@@ -241,8 +249,10 @@ const getDifferences = async (locals?: string[], remotes?: { [key: string]: Stor
   const missingObjects = new Set(Object.values(missingObjectsPerBag).flat())
 
   console.log(`Missing ${missingObjects.size} objects`)
-  console.log(`Found ${unexpectedLocal.size} unexpected local objects`)
-  console.log(`Found ${unexpectedUnapproved.size} QN unapproved local objects`)
+  if (!customTimestamp) {
+    console.log(`Found ${unexpectedLocal.size} unexpected local objects`)
+    console.log(`Found ${unexpectedUnapproved.size} QN unapproved local objects`)
+  }
 
   await fs.promises.writeFile(
     bagId != null ? getDiffBagPath(bagId, filesPostfix) : getDiffPath(filesPostfix),
@@ -485,13 +495,14 @@ const checkRemoteNode = async (url?: string) => {
 const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
 const nextInc = await getIncValue()
 const filesPostfix = await getFilePostfix()
+let customTimestamp = false
 
 switch (command) {
   case Commands.LocalFiles:
     getLocalFiles()
     break
   case Commands.BucketObjects:
-    getAllBucketObjects()
+    getBucketObjects()
     break
   case Commands.Diff:
     getDifferences()
@@ -501,7 +512,7 @@ switch (command) {
     break
   case Commands.CheckNode:
     await checkRemoteNode()
-    await getAllBucketObjects()
+    await getBucketObjects()
     await getDifferences()
     break
   case Commands.Head:
