@@ -1,6 +1,21 @@
 import fs from 'fs/promises'
 
 export const FILE_BASE_PATH = './results/'
+
+interface FsError {
+  code?: string
+  message: string
+}
+export const createResultsFolder = async () => {
+  try {
+    await fs.mkdir(FILE_BASE_PATH)
+  } catch (e) {
+    const error = e as FsError
+    if (error.code !== 'EEXIST') {
+      throw error
+    }
+  }
+}
 export const getFilePath = (fileName: string, inc: string, nodeName?: string) =>
   `${FILE_BASE_PATH}${fileName}${nodeName ? `-${nodeName}` : ''}-${inc}.json`
 

@@ -4,6 +4,7 @@ import { getFileBirthtime, sortFiles } from './utils/utils.js'
 import psp from 'prompt-sync-plus'
 import { format } from 'date-fns'
 import {
+  createResultsFolder,
   FILE_BASE_PATH,
   getAllLocalFilePath,
   getAllRemoteFilePath,
@@ -123,14 +124,14 @@ const getBucketObjects = async (id?: string) => {
     process.exit(1)
   }
   const bagId = prompt('Enter bag id (optional):')
-  const timeRange = prompt('Enter start and end time (optional, format: startTimestamp-endTimestamp):');
+  const timeRange = prompt('Enter start and end time (optional, format: startTimestamp-endTimestamp):')
 
-  let startTime, endTime;
+  let startTime, endTime
   if (timeRange) {
     customTimestamp = true
-    const timestamps = timeRange.split('-');
-    startTime = timestamps[0] ? Number(timestamps[0]) : undefined;
-    endTime = timestamps[1] ? Number(timestamps[1]) : undefined;
+    const timestamps = timeRange.split('-')
+    startTime = timestamps[0] ? Number(timestamps[0]) : undefined
+    endTime = timestamps[1] ? Number(timestamps[1]) : undefined
   }
 
   if (bagId && isNaN(parseInt(bagId))) {
@@ -194,9 +195,7 @@ const getLocalFiles = async () => {
   console.log('Getting files...')
   const ts = new Date().getTime()
   const allFiles = await fs.promises.readdir(dirPath)
-  const acceptedFiles = allFiles.filter((file) => {
-    !isNaN(parseInt(file))
-  })
+  const acceptedFiles = allFiles.filter((file) => !isNaN(parseInt(file)))
   console.log(`Found ${acceptedFiles.length} files.`)
   const sortedFiles = sortFiles(acceptedFiles)
   await fs.promises.writeFile(setLocalFilePath(nextInc), JSON.stringify(sortedFiles))
@@ -492,6 +491,7 @@ const checkRemoteNode = async (url?: string) => {
   return res ? res : null
 }
 
+await createResultsFolder()
 const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
 const nextInc = await getIncValue()
 const filesPostfix = await getFilePostfix()
