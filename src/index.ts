@@ -1,8 +1,8 @@
 import * as fs from 'fs'
 import fetch from 'node-fetch'
-import { getFileBirthtime, sortFiles } from './utils/utils.js'
+import { sortFiles } from './utils/utils.js'
 import psp from 'prompt-sync-plus'
-import { format } from 'date-fns'
+import dotenv from 'dotenv'
 import {
   createResultsFolder,
   FILE_BASE_PATH,
@@ -37,6 +37,7 @@ import {
   StorageObject,
 } from './types.js'
 
+dotenv.config()
 const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
 
 const prompt = psp(undefined)
@@ -80,7 +81,7 @@ const fetchPaginatedData = async <T>(
   while (hasMoreData) {
     const timeoutId = setTimeout(() => controller.abort(), 1000 * 60 * 5) // 5 minutes
     logProgress && console.log('Fetching data. Page:', offset / pageSize)
-    const response = await fetch('https://query.joystream.org/graphql', {
+    const response = await fetch(process.env.QN_BASEURL || 'https://query.joystream.org/graphql', {
       method: 'POST',
       signal: controller.signal,
       headers: { 'Content-Type': 'application/json' },
