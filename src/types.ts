@@ -67,4 +67,5 @@ export enum Commands {
     CheckNode = 'checknode',
     CheckAllOperators = 'checkalloperators',
     DownloadMissing = 'downloadmissing',
+    Exit = 'exit',
 }

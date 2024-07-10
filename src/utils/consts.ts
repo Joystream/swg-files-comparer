@@ -1,0 +1,1 @@
+export const RECENT_FILES_THRESHOLD = 1000 * 60 * 20 // 20 minutes
