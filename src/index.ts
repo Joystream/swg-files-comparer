@@ -18,14 +18,14 @@ dotenv.config()
 
 await createResultsFolder()
 let isRunning = true
-const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
-const nextInc = await getIncValue()
-const filesPostfix = await getFilePostfix()
-store.setState('nextInc', nextInc)
-store.setState('filesPostfix', filesPostfix)
-store.setState('customTimestamp', false)
-
 while (isRunning) {
+  const command = prompt('Enter command:\n(command list is available in readme)\n').toLowerCase()
+  const nextInc = await getIncValue()
+  const filesPostfix = await getFilePostfix()
+  store.setState('nextInc', nextInc)
+  store.setState('filesPostfix', filesPostfix)
+  store.setState('customTimestamp', false)
+
   switch (command) {
     case Commands.LocalFiles:
       await getLocalFiles()
